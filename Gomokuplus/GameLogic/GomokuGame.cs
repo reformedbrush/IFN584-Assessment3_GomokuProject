@@ -1,5 +1,6 @@
 using System;
 using GomokuPlus.Exceptions;
+using GomokuPlus.Framework;
 using GomokuPlus.Models;
 using GomokuPlus.Persistence;
 using GomokuPlus.Players;
@@ -18,21 +19,38 @@ namespace GomokuPlus.GameLogic
         private GameMode mode;
         private int turnCount;
         private bool gameOver;
+        private readonly IGameRules rules;
+        private readonly HistoryManager history;
+        private readonly GameVariant variant;
+        private readonly AiLevel aiLevel;
 
         public GomokuGame(GameMode mode, string player1Name, string player2Name)
+            : this(mode, player1Name, player2Name, GameVariant.GomokuPlus, AiLevel.Easy)
         {
+        }
+
+        public GomokuGame(GameMode mode, string player1Name, string player2Name, GameVariant variant, AiLevel aiLevel)
+        {
+            GameVariantDefinition definition = GameVariantRegistry.Find(variant.ToString());
+            if (definition == null || !definition.IsImplemented)
+                throw new InvalidOperationException("The selected game variant is not implemented.");
+
             this.mode = mode;
+            this.variant = variant;
+            this.aiLevel = aiLevel;
             board = new Board();
             player1 = new HumanPlayer(player1Name, 1);
 
             if (mode == GameMode.HumanVsHuman)
                 player2 = new HumanPlayer(player2Name, 2);
             else
-                player2 = new ComputerPlayer(player2Name, 2);
+                player2 = new ComputerPlayer(player2Name, 2, aiLevel);
 
             currentPlayer = player1;
             turnCount = 1;
             gameOver = false;
+            rules = definition.Rules;
+            history = new HistoryManager();
         }
 
         // Only used internally when restoring a saved game.
@@ -45,6 +63,10 @@ namespace GomokuPlus.GameLogic
             currentPlayer = player1;
             turnCount = 1;
             gameOver = false;
+            rules = new GomokuPlusRules();
+            history = new HistoryManager();
+            variant = GameVariant.GomokuPlus;
+            aiLevel = AiLevel.Easy;
         }
 
         public Board Board
@@ -70,6 +92,31 @@ namespace GomokuPlus.GameLogic
         public int TurnCount
         {
             get { return turnCount; }
+        }
+
+        public bool CanUndo
+        {
+            get { return history.CanUndo; }
+        }
+
+        public bool CanRedo
+        {
+            get { return history.CanRedo; }
+        }
+
+        public IGameRules Rules
+        {
+            get { return rules; }
+        }
+
+        public GameVariant Variant
+        {
+            get { return variant; }
+        }
+
+        public AiLevel AiLevel
+        {
+            get { return aiLevel; }
         }
 
         private Player Opponent()
@@ -101,6 +148,20 @@ namespace GomokuPlus.GameLogic
                 if (move.Type == MoveType.Save)
                 {
                     SaveGame();
+                    continue;
+                }
+
+                if (move.Type == MoveType.Undo)
+                {
+                    if (!Undo())
+                        Console.WriteLine("Nothing to undo.");
+                    continue;
+                }
+
+                if (move.Type == MoveType.Redo)
+                {
+                    if (!Redo())
+                        Console.WriteLine("Nothing to redo.");
                     continue;
                 }
 
@@ -136,75 +197,9 @@ namespace GomokuPlus.GameLogic
             else
                 opponentNumber = 1;
 
-            ValidateMove(player, move, opponentNumber);
-
-            if (move.Type == MoveType.Ordinary)
-            {
-                board.PlaceStone(move.Row, move.Col, player.OrdinarySymbol);
-                return WinChecker.CheckWin(board, move.Row, move.Col, player.PlayerNumber);
-            }
-            else if (move.Type == MoveType.Heavy)
-            {
-                board.PlaceStone(move.Row, move.Col, player.HeavySymbol);
-                player.HeavyStonesRemaining = player.HeavyStonesRemaining - 1;
-                return WinChecker.CheckWin(board, move.Row, move.Col, player.PlayerNumber);
-            }
-            else if (move.Type == MoveType.Eraser)
-            {
-                board.ClearCell(move.Row, move.Col);
-                player.EraserStonesRemaining = player.EraserStonesRemaining - 1;
-                return false;
-            }
-            else
-            {
-                throw new InvalidMoveException("Unknown move type.");
-            }
-        }
-
-        private void ValidateMove(Player player, Move move, int opponentNumber)
-        {
-            if (!Board.IsInsideBoard(move.Row, move.Col))
-                throw new InvalidMoveException("(" + move.Row + "," + move.Col + ") is outside the 10x10 grid.");
-
-            if (move.Type == MoveType.Ordinary)
-            {
-                if (!board.IsEmpty(move.Row, move.Col))
-                    throw new InvalidMoveException("Cell (" + move.Row + "," + move.Col + ") is already occupied.");
-            }
-            else if (move.Type == MoveType.Heavy)
-            {
-                if (player.HeavyStonesRemaining <= 0)
-                    throw new InvalidMoveException(player.Name + " has no Heavy Stones left.");
-                if (!board.IsEmpty(move.Row, move.Col))
-                    throw new InvalidMoveException("Cell (" + move.Row + "," + move.Col + ") is already occupied.");
-            }
-            else if (move.Type == MoveType.Eraser)
-            {
-                if (player.EraserStonesRemaining <= 0)
-                    throw new InvalidMoveException(player.Name + " has no Eraser Stones left.");
-
-                StoneType target = board.GetCell(move.Row, move.Col);
-
-                StoneType opponentOrdinary;
-                StoneType opponentHeavy;
-                if (opponentNumber == 1)
-                {
-                    opponentOrdinary = StoneType.OrdinaryP1;
-                    opponentHeavy = StoneType.HeavyP1;
-                }
-                else
-                {
-                    opponentOrdinary = StoneType.OrdinaryP2;
-                    opponentHeavy = StoneType.HeavyP2;
-                }
-
-                if (target == StoneType.Empty)
-                    throw new InvalidMoveException("Cell (" + move.Row + "," + move.Col + ") is empty; there is nothing to erase.");
-                if (target == opponentHeavy)
-                    throw new InvalidMoveException("Heavy Stones cannot be targeted or removed by an Eraser Stone.");
-                if (target != opponentOrdinary)
-                    throw new InvalidMoveException("The Eraser Stone must target an opponent's Ordinary Stone.");
-            }
+            rules.ValidateMove(board, player, move, opponentNumber);
+            history.RecordBeforeMove(CaptureSnapshot());
+            return rules.ApplyMove(board, player, move, opponentNumber);
         }
 
         private void SwitchTurn()
@@ -215,6 +210,52 @@ namespace GomokuPlus.GameLogic
                 currentPlayer = player1;
 
             turnCount = turnCount + 1;
+        }
+
+        public bool Undo()
+        {
+            GameSnapshotData restored = history.Undo(CaptureSnapshot());
+            if (restored == null)
+                return false;
+
+            RestoreSnapshot(restored);
+            gameOver = false;
+            return true;
+        }
+
+        public bool Redo()
+        {
+            GameSnapshotData restored = history.Redo(CaptureSnapshot());
+            if (restored == null)
+                return false;
+
+            RestoreSnapshot(restored);
+            gameOver = false;
+            return true;
+        }
+
+        private GameSnapshotData CaptureSnapshot()
+        {
+            GameSnapshotData snapshot = new GameSnapshotData();
+            snapshot.Grid = board.ToJaggedArray();
+            snapshot.CurrentPlayerNumber = currentPlayer.PlayerNumber;
+            snapshot.TurnCount = turnCount;
+            snapshot.Player1HeavyRemaining = player1.HeavyStonesRemaining;
+            snapshot.Player1EraserRemaining = player1.EraserStonesRemaining;
+            snapshot.Player2HeavyRemaining = player2.HeavyStonesRemaining;
+            snapshot.Player2EraserRemaining = player2.EraserStonesRemaining;
+            return snapshot;
+        }
+
+        private void RestoreSnapshot(GameSnapshotData snapshot)
+        {
+            board.LoadFromJaggedArray(snapshot.Grid);
+            turnCount = snapshot.TurnCount;
+            player1.HeavyStonesRemaining = snapshot.Player1HeavyRemaining;
+            player1.EraserStonesRemaining = snapshot.Player1EraserRemaining;
+            player2.HeavyStonesRemaining = snapshot.Player2HeavyRemaining;
+            player2.EraserStonesRemaining = snapshot.Player2EraserRemaining;
+            currentPlayer = snapshot.CurrentPlayerNumber == 1 ? player1 : player2;
         }
 
         // --- Save and Load ---------------------------------------------------------
@@ -234,12 +275,16 @@ namespace GomokuPlus.GameLogic
             data.CurrentPlayerNumber = currentPlayer.PlayerNumber;
             data.TurnCount = turnCount;
             data.GameMode = mode.ToString();
+            data.GameVariant = variant.ToString();
+            data.AiLevel = aiLevel.ToString();
             data.Player1Name = player1.Name;
             data.Player2Name = player2.Name;
             data.Player1HeavyRemaining = player1.HeavyStonesRemaining;
             data.Player1EraserRemaining = player1.EraserStonesRemaining;
             data.Player2HeavyRemaining = player2.HeavyStonesRemaining;
             data.Player2EraserRemaining = player2.EraserStonesRemaining;
+            data.UndoHistory = history.UndoHistory();
+            data.RedoHistory = history.RedoHistory();
 
             try
             {
@@ -264,6 +309,10 @@ namespace GomokuPlus.GameLogic
                 else
                     loadedMode = GameMode.HumanVsHuman;
 
+                AiLevel loadedAiLevel = AiLevel.Easy;
+                if (!string.IsNullOrEmpty(data.AiLevel))
+                    Enum.TryParse(data.AiLevel, true, out loadedAiLevel);
+
                 Player loadedPlayer1 = new HumanPlayer(data.Player1Name, 1);
                 loadedPlayer1.HeavyStonesRemaining = data.Player1HeavyRemaining;
                 loadedPlayer1.EraserStonesRemaining = data.Player1EraserRemaining;
@@ -272,12 +321,16 @@ namespace GomokuPlus.GameLogic
                 if (loadedMode == GameMode.HumanVsHuman)
                     loadedPlayer2 = new HumanPlayer(data.Player2Name, 2);
                 else
-                    loadedPlayer2 = new ComputerPlayer(data.Player2Name, 2);
+                    loadedPlayer2 = new ComputerPlayer(data.Player2Name, 2, loadedAiLevel);
 
                 loadedPlayer2.HeavyStonesRemaining = data.Player2HeavyRemaining;
                 loadedPlayer2.EraserStonesRemaining = data.Player2EraserRemaining;
 
-                GomokuGame game = new GomokuGame(loadedMode, loadedPlayer1, loadedPlayer2);
+                GameVariant loadedVariant = GameVariant.GomokuPlus;
+                if (!string.IsNullOrEmpty(data.GameVariant))
+                    Enum.TryParse(data.GameVariant, true, out loadedVariant);
+
+                GomokuGame game = new GomokuGame(loadedMode, loadedPlayer1, loadedPlayer2, loadedVariant, loadedAiLevel);
                 game.turnCount = data.TurnCount;
                 game.board.LoadFromJaggedArray(data.Grid);
 
@@ -286,6 +339,7 @@ namespace GomokuPlus.GameLogic
                 else
                     game.currentPlayer = loadedPlayer2;
 
+                game.history.Restore(data.UndoHistory, data.RedoHistory);
                 Console.WriteLine("Game loaded from '" + fileName + "'.");
                 return game;
             }
@@ -296,6 +350,24 @@ namespace GomokuPlus.GameLogic
             }
         }
 
+        private GomokuGame(GameMode mode, Player player1, Player player2, GameVariant variant, AiLevel aiLevel)
+        {
+            this.mode = mode;
+            this.player1 = player1;
+            this.player2 = player2;
+            this.variant = variant;
+            this.aiLevel = aiLevel;
+            board = new Board();
+            currentPlayer = player1;
+            turnCount = 1;
+            gameOver = false;
+            GameVariantDefinition definition = GameVariantRegistry.Find(variant.ToString());
+            if (definition == null || !definition.IsImplemented)
+                throw new InvalidOperationException("The saved game variant is not implemented.");
+            rules = definition.Rules;
+            history = new HistoryManager();
+        }
+
         // --- Automated testing mode ---------------------------------------------
         // Parses a comma-separated command string (e.g. "O3:2,O3:3,...") from the
         // command line, applies each move alternating P1/P2, and renders the
@@ -303,7 +375,12 @@ namespace GomokuPlus.GameLogic
 
         public static void RunAutomatedScript(string script)
         {
-            GomokuGame game = new GomokuGame(GameMode.HumanVsHuman, "Player 1", "Player 2");
+            RunAutomatedScript(script, GameVariant.GomokuPlus);
+        }
+
+        public static void RunAutomatedScript(string script, GameVariant variant)
+        {
+            GomokuGame game = new GomokuGame(GameMode.HumanVsHuman, "Player 1", "Player 2", variant, AiLevel.Easy);
             string[] commands = script.Split(',');
 
             Console.WriteLine("Running automated testing mode...");
