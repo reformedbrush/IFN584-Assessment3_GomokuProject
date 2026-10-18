@@ -31,6 +31,12 @@ namespace GomokuPlus.Players
                 if (input == "S" || input == "s")
                     return new Move(MoveType.Save, 0, 0);
 
+                if (input == "U" || input == "u")
+                    return new Move(MoveType.Undo, 0, 0);
+
+                if (input == "R" || input == "r")
+                    return new Move(MoveType.Redo, 0, 0);
+
                 if (input == "Q" || input == "q")
                     return new Move(MoveType.Quit, 0, 0);
 

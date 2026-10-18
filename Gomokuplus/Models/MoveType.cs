@@ -8,6 +8,8 @@ namespace GomokuPlus.Models
         Heavy,
         Eraser,
         Save,
+        Undo,
+        Redo,
         Quit
     }
 }
